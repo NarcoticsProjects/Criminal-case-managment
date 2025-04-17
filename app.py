@@ -28,32 +28,69 @@ app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max upload
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
 
+# Function to fix MongoDB URI format
+def get_formatted_mongodb_uri():
+    uri = os.getenv('MONGODB_URI')
+    if not uri:
+        return None
+        
+    # Remove any existing parameters to add our own
+    if '?' in uri:
+        base_uri = uri.split('?')[0]
+    else:
+        base_uri = uri
+        
+    # Ensure URI ends with the database name
+    if not base_uri.split('/')[-1]:
+        base_uri += 'criminal_case_db'
+    elif base_uri.split('/')[-1] == '':
+        base_uri += 'criminal_case_db'
+        
+    # Add required parameters
+    final_uri = f"{base_uri}?retryWrites=true&w=majority&tls=true"
+    
+    return final_uri
+
 # MongoDB setup
-mongodb_uri = os.getenv('MONGODB_URI')
-try:
-    # Use a different connection approach that's more compatible with Render
-    client = MongoClient(
-        mongodb_uri,
-        tlsAllowInvalidCertificates=True,  # Only use in development or if you have certificate issues
-        serverSelectionTimeoutMS=5000,
-        connectTimeoutMS=5000,
-        socketTimeoutMS=5000
-    )
-    
-    # Test connection
-    client.admin.command('ping')
-    print("MongoDB connection successful")
-    
-    # Access database and collections
-    db = client['criminal_case_db']
-    users_collection = db['users']
-    cases_collection = db['cases']
-    
-    # Initialize GridFS for storing images
-    fs = GridFS(db, collection='images')
-except Exception as e:
-    print(f"MongoDB connection error: {e}")
-    # Don't crash the app, but set collections to None
+mongodb_uri = get_formatted_mongodb_uri()
+
+# Only proceed with MongoDB init if URI is available
+if mongodb_uri:
+    try:
+        # Create a MongoClient instance that will work on Render
+        # Use fully explicit parameters to avoid SSL issues
+        client = MongoClient(
+            host=mongodb_uri,
+            tls=True,
+            tlsAllowInvalidCertificates=False,  # Proper certificate validation
+            retryWrites=True,
+            w='majority',
+            connectTimeoutMS=30000,
+            socketTimeoutMS=30000,
+            serverSelectionTimeoutMS=30000,
+            appName='criminal-case-app'
+        )
+        
+        # Test connection with longer timeout for initial connection
+        client.server_info()
+        print("MongoDB connection successful")
+        
+        # Access database and collections
+        db = client['criminal_case_db']
+        users_collection = db['users']
+        cases_collection = db['cases']
+        
+        # Initialize GridFS for storing images
+        fs = GridFS(db, collection='images')
+    except Exception as e:
+        print(f"MongoDB connection error: {e}")
+        client = None
+        db = None
+        users_collection = None
+        cases_collection = None
+        fs = None
+else:
+    print("No MongoDB URI provided")
     client = None
     db = None
     users_collection = None
@@ -89,15 +126,24 @@ def login():
         username = request.form.get('username')
         password = request.form.get('password')
         
-        user_data = users_collection.find_one({'username': username})
+        # Check if MongoDB is connected
+        if users_collection is None:
+            flash('Database service unavailable. Please try again later.')
+            return render_template('login.html')
         
-        if user_data and bcrypt.check_password_hash(user_data['password'], password):
-            user = User(user_data)
-            login_user(user)
-            next_page = request.args.get('next')
-            return redirect(next_page or url_for('dashboard'))
-        else:
-            flash('Login failed. Please check your username and password.')
+        try:
+            user_data = users_collection.find_one({'username': username})
+            
+            if user_data and bcrypt.check_password_hash(user_data['password'], password):
+                user = User(user_data)
+                login_user(user)
+                next_page = request.args.get('next')
+                return redirect(next_page or url_for('dashboard'))
+            else:
+                flash('Login failed. Please check your username and password.')
+        except Exception as e:
+            print(f"Login error: {e}")
+            flash('An error occurred during login. Please try again later.')
     
     return render_template('login.html')
 
@@ -115,27 +161,36 @@ def register():
         if password != confirm_password:
             flash('Passwords do not match.')
             return redirect(url_for('register'))
-            
-        existing_user = users_collection.find_one({
-            '$or': [
-                {'username': username},
-                {'email': email}
-            ]
-        })
         
-        if existing_user:
-            flash('Username or email already exists.')
-            return redirect(url_for('register'))
+        # Check if MongoDB is connected
+        if users_collection is None:
+            flash('Database service unavailable. Please try again later.')
+            return render_template('register.html')
             
-        hashed_password = bcrypt.generate_password_hash(password).decode('utf-8')
-        new_user = User.create_user(username, email, hashed_password)
-        
-        result = users_collection.insert_one(new_user)
-        if result.inserted_id:
-            flash('Registration successful! You can now log in.')
-            return redirect(url_for('login'))
-        else:
-            flash('Registration failed. Please try again.')
+        try:    
+            existing_user = users_collection.find_one({
+                '$or': [
+                    {'username': username},
+                    {'email': email}
+                ]
+            })
+            
+            if existing_user:
+                flash('Username or email already exists.')
+                return redirect(url_for('register'))
+                
+            hashed_password = bcrypt.generate_password_hash(password).decode('utf-8')
+            new_user = User.create_user(username, email, hashed_password)
+            
+            result = users_collection.insert_one(new_user)
+            if result.inserted_id:
+                flash('Registration successful! You can now log in.')
+                return redirect(url_for('login'))
+            else:
+                flash('Registration failed. Please try again.')
+        except Exception as e:
+            print(f"Registration error: {e}")
+            flash('An error occurred during registration. Please try again later.')
     
     return render_template('register.html')
 
@@ -159,8 +214,7 @@ def index():
             flash('Title is required!')
             return redirect(request.url)
         
-        # Check if MongoDB is connected
-        if fs is None or cases_collection is None:
+        if client is None or cases_collection is None:
             flash('Database connection error. Please try again later or contact support.')
             return redirect(request.url)
         
@@ -248,7 +302,6 @@ def index():
 @app.route('/image/<image_id>')
 def get_image(image_id):
     """Route to serve images from GridFS"""
-    # Check if MongoDB is connected
     if fs is None:
         return redirect(url_for('static', filename='img/no-image.svg')), 404
         
@@ -272,7 +325,6 @@ def submission_success():
 @app.route('/dashboard')
 @login_required
 def dashboard():
-    # Check if MongoDB is connected
     if cases_collection is None:
         flash('Database connection error. Please try again later.')
         return render_template('dashboard.html', cases=[])
@@ -293,7 +345,6 @@ def dashboard():
 @app.route('/case/<case_id>')
 @login_required
 def view_case(case_id):
-    # Check if MongoDB is connected
     if cases_collection is None:
         flash('Database connection error. Please try again later.')
         return redirect(url_for('dashboard'))
@@ -341,7 +392,7 @@ def update_status(case_id):
 if __name__ == '__main__':
     # Test MongoDB connection
     try:
-        client.admin.command('ping')
+        client.server_info()
         print("MongoDB connection successful!")
     except Exception as e:
         print(f"MongoDB connection failed: {e}")

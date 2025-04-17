@@ -8,4 +8,8 @@ services:
       - key: PORT
         value: 10000
       - key: PYTHON_VERSION
-        value: 3.10.0 
+        value: 3.10.0
+      - key: SECRET_KEY
+        generateValue: true
+      - key: MONGODB_URI
+        sync: false # This means you need to set it manually in the Render dashboard   
