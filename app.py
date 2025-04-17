@@ -30,15 +30,27 @@ ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
 
 # MongoDB setup
 mongodb_uri = os.getenv('MONGODB_URI')
-client = MongoClient(mongodb_uri, server_api=ServerApi('1'))
-
-# Access database and collections
-db = client['criminal_case_db']
-users_collection = db['users']
-cases_collection = db['cases']
-
-# Initialize GridFS for storing images
-fs = GridFS(db, collection='images')
+try:
+    client = MongoClient(mongodb_uri, server_api=ServerApi('1'), serverSelectionTimeoutMS=5000)
+    # Test connection
+    client.admin.command('ping')
+    print("MongoDB connection successful")
+    
+    # Access database and collections
+    db = client['criminal_case_db']
+    users_collection = db['users']
+    cases_collection = db['cases']
+    
+    # Initialize GridFS for storing images
+    fs = GridFS(db, collection='images')
+except Exception as e:
+    print(f"MongoDB connection error: {e}")
+    # Don't crash the app, but set collections to None
+    client = None
+    db = None
+    users_collection = None
+    cases_collection = None
+    fs = None
 
 # Initialize LoginManager
 login_manager = LoginManager()
@@ -288,4 +300,6 @@ if __name__ == '__main__':
     except Exception as e:
         print(f"MongoDB connection failed: {e}")
     
-    app.run(debug=True) 
+    # Get port from environment variable for Render deployment
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port) 
