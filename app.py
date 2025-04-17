@@ -31,7 +31,15 @@ ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
 # MongoDB setup
 mongodb_uri = os.getenv('MONGODB_URI')
 try:
-    client = MongoClient(mongodb_uri, server_api=ServerApi('1'), serverSelectionTimeoutMS=5000)
+    # Use a different connection approach that's more compatible with Render
+    client = MongoClient(
+        mongodb_uri,
+        tlsAllowInvalidCertificates=True,  # Only use in development or if you have certificate issues
+        serverSelectionTimeoutMS=5000,
+        connectTimeoutMS=5000,
+        socketTimeoutMS=5000
+    )
+    
     # Test connection
     client.admin.command('ping')
     print("MongoDB connection successful")
@@ -151,6 +159,11 @@ def index():
             flash('Title is required!')
             return redirect(request.url)
         
+        # Check if MongoDB is connected
+        if fs is None or cases_collection is None:
+            flash('Database connection error. Please try again later or contact support.')
+            return redirect(request.url)
+        
         # Handle multiple file uploads
         uploaded_files = []
         if 'images' not in request.files:
@@ -164,60 +177,69 @@ def index():
                 continue
                 
             if file and allowed_file(file.filename):
-                # Create a unique filename
-                filename = str(uuid.uuid4()) + secure_filename(file.filename)
-                
-                # Process and optimize the image
-                image = Image.open(file)
-                
-                # Convert to RGB if needed
-                if image.mode != 'RGB':
-                    image = image.convert('RGB')
-                
-                # Resize if too large (optional)
-                max_size = (1200, 1200)
-                image.thumbnail(max_size, Image.LANCZOS)
-                
-                # Save to in-memory buffer
-                buffer = io.BytesIO()
-                image.save(buffer, format='JPEG', quality=85, optimize=True)
-                buffer.seek(0)
-                
-                # Store in MongoDB GridFS with metadata
-                image_id = fs.put(
-                    buffer, 
-                    filename=filename,
-                    contentType='image/jpeg', 
-                    metadata={
-                        'uploaded_at': datetime.now(),
-                        'original_filename': file.filename
-                    }
-                )
-                
-                # Save the GridFS ID as a string to reference later
-                uploaded_files.append(str(image_id))
+                try:
+                    # Create a unique filename
+                    filename = str(uuid.uuid4()) + secure_filename(file.filename)
+                    
+                    # Process and optimize the image
+                    image = Image.open(file)
+                    
+                    # Convert to RGB if needed
+                    if image.mode != 'RGB':
+                        image = image.convert('RGB')
+                    
+                    # Resize if too large (optional)
+                    max_size = (1200, 1200)
+                    image.thumbnail(max_size, Image.LANCZOS)
+                    
+                    # Save to in-memory buffer
+                    buffer = io.BytesIO()
+                    image.save(buffer, format='JPEG', quality=85, optimize=True)
+                    buffer.seek(0)
+                    
+                    # Store in MongoDB GridFS with metadata
+                    image_id = fs.put(
+                        buffer, 
+                        filename=filename,
+                        contentType='image/jpeg', 
+                        metadata={
+                            'uploaded_at': datetime.now(),
+                            'original_filename': file.filename
+                        }
+                    )
+                    
+                    # Save the GridFS ID as a string to reference later
+                    uploaded_files.append(str(image_id))
+                except Exception as e:
+                    print(f"Error processing image: {e}")
+                    flash(f"Error processing image: {file.filename}")
+                    continue
         
-        # Save data to MongoDB
-        user_id = current_user.id if current_user.is_authenticated else None
-        case_data = Case.create_case(
-            title, 
-            description, 
-            latitude, 
-            longitude, 
-            uploaded_files,
-            user_id
-        )
-        
-        result = cases_collection.insert_one(case_data)
-        
-        if result.inserted_id:
-            flash('Case submitted successfully!')
-            if current_user.is_authenticated:
-                return redirect(url_for('dashboard'))
+        try:
+            # Save data to MongoDB
+            user_id = current_user.id if current_user.is_authenticated else None
+            case_data = Case.create_case(
+                title, 
+                description, 
+                latitude, 
+                longitude, 
+                uploaded_files,
+                user_id
+            )
+            
+            result = cases_collection.insert_one(case_data)
+            
+            if result.inserted_id:
+                flash('Case submitted successfully!')
+                if current_user.is_authenticated:
+                    return redirect(url_for('dashboard'))
+                else:
+                    return redirect(url_for('submission_success'))
             else:
-                return redirect(url_for('submission_success'))
-        else:
-            flash('Error submitting case. Please try again.')
+                flash('Error submitting case. Please try again.')
+        except Exception as e:
+            print(f"Error saving case to database: {e}")
+            flash('Database error. Please try again later.')
             
         return redirect(url_for('index'))
         
@@ -226,6 +248,10 @@ def index():
 @app.route('/image/<image_id>')
 def get_image(image_id):
     """Route to serve images from GridFS"""
+    # Check if MongoDB is connected
+    if fs is None:
+        return redirect(url_for('static', filename='img/no-image.svg')), 404
+        
     try:
         # Find image in GridFS by ID
         image = fs.get(ObjectId(image_id))
@@ -246,24 +272,44 @@ def submission_success():
 @app.route('/dashboard')
 @login_required
 def dashboard():
-    # Get all cases, sorted by creation date (newest first)
-    cases = list(cases_collection.find().sort('created_at', -1))
+    # Check if MongoDB is connected
+    if cases_collection is None:
+        flash('Database connection error. Please try again later.')
+        return render_template('dashboard.html', cases=[])
     
-    # Format cases for display
-    formatted_cases = [Case.format_case(case) for case in cases]
-    
-    return render_template('dashboard.html', cases=formatted_cases)
+    try:
+        # Get all cases, sorted by creation date (newest first)
+        cases = list(cases_collection.find().sort('created_at', -1))
+        
+        # Format cases for display
+        formatted_cases = [Case.format_case(case) for case in cases]
+        
+        return render_template('dashboard.html', cases=formatted_cases)
+    except Exception as e:
+        print(f"Error retrieving cases: {e}")
+        flash('Error retrieving cases. Please try again later.')
+        return render_template('dashboard.html', cases=[])
 
 @app.route('/case/<case_id>')
 @login_required
 def view_case(case_id):
-    case = cases_collection.find_one({'_id': ObjectId(case_id)})
-    if not case:
-        flash('Case not found.')
+    # Check if MongoDB is connected
+    if cases_collection is None:
+        flash('Database connection error. Please try again later.')
         return redirect(url_for('dashboard'))
     
-    formatted_case = Case.format_case(case)
-    return render_template('case_details.html', case=formatted_case)
+    try:
+        case = cases_collection.find_one({'_id': ObjectId(case_id)})
+        if not case:
+            flash('Case not found.')
+            return redirect(url_for('dashboard'))
+        
+        formatted_case = Case.format_case(case)
+        return render_template('case_details.html', case=formatted_case)
+    except Exception as e:
+        print(f"Error retrieving case details: {e}")
+        flash('Error retrieving case details. Please try again later.')
+        return redirect(url_for('dashboard'))
 
 @app.route('/api/update-status/<case_id>', methods=['POST'])
 @login_required
