@@ -1,0 +1,68 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+.pytest_cache/
+
+# Virtual Environment
+venv/
+ENV/
+.env
+.venv
+
+# Flask instance folder
+instance/
+
+# Logs
+logs/
+*.log
+
+# Uploads (no longer needed since we're using GridFS)
+static/uploads/
+
+# Database
+*.sqlite
+*.db
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS specific files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Cache files
+__pycache__/
+.cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Migration temporary files
+*.bak
+*.tmp 
